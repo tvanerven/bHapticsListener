@@ -68,13 +68,16 @@ def env_override(cfg: dict) -> dict:
     cfg["ws_url"]   = os.getenv("BHX_WS_URL",   cfg.get("ws_url",   ""))
     return cfg
 
-def sanitize_websocket_url(url: str) -> str:
+def sanitize_websocket_url(url: str, id: str) -> str:
     url = url.strip().rstrip("/")
     if not (url.startswith("ws://") or url.startswith("wss://")):
         # Upgrade http(s) → wss by default
         url = url.replace("http://", "ws://").replace("https://", "wss://")
         if not (url.startswith("ws://") or url.startswith("wss://")):
             url = f"wss://{url}"
+    if not url.endswith(f"/ws/listen/bHapticsClient_{id}"):
+        url += f"/ws/listen/bHapticsClient_{id}"
+    # Always append the suffix "/ws/listen/{id}"
     return url
 
 def load_config_interactive() -> dict:
@@ -85,9 +88,9 @@ def load_config_interactive() -> dict:
     # Prompt for missing values
     if not cfg.get("ws_url"):
         ws = input("Enter WebSocket URL (e.g., wss://host:8765): ").strip()
-        cfg["ws_url"] = sanitize_websocket_url(ws)
+        cfg["ws_url"] = sanitize_websocket_url(ws, cfg["app_id"])
     else:
-        cfg["ws_url"] = sanitize_websocket_url(cfg["ws_url"])
+        cfg["ws_url"] = sanitize_websocket_url(cfg["ws_url"], cfg["app_id"])
 
     if not cfg.get("app_id"):
         cfg["app_id"] = input("Enter bHaptics App ID: ").strip()
