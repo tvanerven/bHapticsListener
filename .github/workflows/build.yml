@@ -1,0 +1,17 @@
+name: build-windows-exe
+on: [push]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pyyaml websockets bhaptics-python
+          pyinstaller --onefile --console --name bhx_bridge client.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bhx_bridge-win
+          path: dist/bhx_bridge.exe
