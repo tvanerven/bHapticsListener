@@ -201,20 +201,22 @@ def setup_sentry(dsn: str, app_name: str, logger: Logger, environment: str = "pr
 # -------------------------
 class FrameConverter:
     """
-    Expects a message shaped like:
+    Flexible converter for server payloads. Accepts shapes like:
+
     {
       "word1": [
-        {
-          "duration": 200,
+        { "duration": 200,
           "frame_nodes": [
-            {
-              "node_index": [0, 5, 6],            # motor indices (0..31)
-              "intensity":  [64, 255, 128]       # 0..255, will be scaled to 0..100
-            }
+            { "node_index": [0,5,6], "intensity": [64,255,128] }
           ]
         }
-      ]
+      ],
+      "word2": { "duration": 150, "frame_nodes": { "node_index": 3, "intensity": 200 } },
+      "pause": 300  # optional: treat as 300ms pause (all zeros)
     }
+
+    Also ignores non-frame events such as:
+    { "type": "ServerEventNameList", "message": ["required"] }
     """
     def __init__(self, sentence: dict, logger: Logger):
         self.sentence = sentence
@@ -222,37 +224,113 @@ class FrameConverter:
         self._logger = logger
         self._parse_sentence()
 
-    def _parse_sentence(self) -> None:
-        for word in self.sentence:
-            self._parse_frames(self.sentence[word])
+    def _as_list(self, x):
+        # Turn scalars into single-item lists; keep lists/tuples as-is; None -> []
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple)):
+            return list(x)
+        return [x]
 
-    def _parse_frames(self, word) -> None:
-        for frame in word:
-            duration = int(frame.get("duration", 200))
-            padded = [0] * 32  # TactSuit Pro: 32 motors; adjust if you target X40
-    
-            # Combine all frame_nodes into a single motor array
+    def _coerce_int(self, x, default=0):
+        try:
+            return int(x)
+        except Exception:
+            return default
+
+    def _parse_sentence(self) -> None:
+        # Ignore server “event” messages that aren’t frame payloads
+        if isinstance(self.sentence, dict) and "type" in self.sentence and "message" in self.sentence:
+            self._logger.info(f"Ignoring server event: type={self.sentence.get('type')} message={self.sentence.get('message')}")
+            return
+
+        if not isinstance(self.sentence, dict):
+            # If the whole payload is a bare int: treat as pause frame.
+            if isinstance(self.sentence, int):
+                self._data.append({"values": [0]*32, "duration": max(0, self._coerce_int(self.sentence, 0))})
+                return
+            self._logger.warning(f"Unexpected payload type {type(self.sentence)}; ignoring.")
+            return
+
+        for key, val in self.sentence.items():
+            # Accept int as "pause"
+            if isinstance(val, int):
+                self._data.append({"values": [0]*32, "duration": max(0, self._coerce_int(val, 0))})
+                continue
+
+            # A single frame dict or a list of frames
+            if isinstance(val, dict):
+                frames = [val]
+            elif isinstance(val, list):
+                frames = val
+            else:
+                self._logger.warning(f"Ignoring {key}: unexpected value type {type(val)}")
+                continue
+
+            self._parse_frames(frames, label=key)
+
+    def _parse_frames(self, frames, label: str) -> None:
+        for idx_frame, frame in enumerate(frames):
+            if not isinstance(frame, dict):
+                # Defensive: allow numbers here as pause
+                if isinstance(frame, int):
+                    self._data.append({"values": [0]*32, "duration": max(0, self._coerce_int(frame, 0))})
+                else:
+                    self._logger.warning(f"Ignoring non-dict frame in {label}[{idx_frame}]: {type(frame)}")
+                continue
+
+            duration = self._coerce_int(frame.get("duration", 200), 200)
+            padded = [0] * 32  # Adjust length if you target a different device
+
             fns = frame.get("frame_nodes", [])
+            # Allow frame_nodes to be a dict or list
+            if isinstance(fns, dict):
+                fns = [fns]
+            elif not isinstance(fns, list):
+                self._logger.warning(f"{label}[{idx_frame}]: frame_nodes has unexpected type {type(fns)}; treating as empty.")
+                fns = []
+
             if not fns:
                 # Explicit pause: append zeros with the duration
-                self._data.append({"values": padded, "duration": duration})
+                self._data.append({"values": padded, "duration": max(0, duration)})
                 continue
-    
-            for fn in fns:
-                raw = fn.get("intensity", [])
-                idxs = fn.get("node_index", [])
+
+            for fn_idx, fn in enumerate(fns):
+                if not isinstance(fn, dict):
+                    self._logger.warning(f"{label}[{idx_frame}].frame_nodes[{fn_idx}] not a dict; skipping.")
+                    continue
+
+                idxs = self._as_list(fn.get("node_index", []))
+                raw  = self._as_list(fn.get("intensity", []))
+
+                # Broadcast single intensity across all idxs if needed
+                if len(raw) == 1 and len(idxs) > 1:
+                    raw = raw * len(idxs)
+
                 for i, idx in enumerate(idxs):
+                    if not isinstance(idx, int):
+                        try:
+                            idx = int(idx)
+                        except Exception:
+                            self._logger.warning(f"{label}[{idx_frame}].frame_nodes[{fn_idx}]: bad idx={idx}; skipping")
+                            continue
                     if 0 <= idx < len(padded):
                         v = raw[i] if i < len(raw) else 0
+                        try:
+                            v = int(v)
+                        except Exception:
+                            v = 0
+                        # Scale 0..255 -> 0..100
                         val = max(0, min(100, round(v * 100 / 255)))
                         if v > 0 and val == 0:
                             val = 1
                         padded[idx] = val
-    
-            self._data.append({"values": padded, "duration": duration})
+                    else:
+                        self._logger.warning(f"{label}[{idx_frame}].frame_nodes[{fn_idx}]: idx {idx} out of range")
+
+            self._data.append({"values": padded, "duration": max(0, duration)})
 
     def _log_frames(self) -> None:
-        # Compact view: only nonzero motors per frame
         total = len(self._data)
         self._logger.info(f"Converted {total} frames:")
         for n, item in enumerate(self._data, start=1):
@@ -261,12 +339,11 @@ class FrameConverter:
 
     async def play(self, simulate: bool = False) -> None:
         if simulate:
-            # Log what would be sent; do not call SDK
             self._log_frames()
             return
-        # Real playback via SDK
         for item in self._data:
             await bh.play_dot(position=0, duration=item["duration"], values=item["values"])
+
 
 # -------------------------
 # Runtime
@@ -322,13 +399,17 @@ def websocket_loop(ws_url: str, logger: Logger, debug: bool):
                     except json.JSONDecodeError:
                         logger.warning("Received non-JSON message; ignoring.")
                         continue
-
+                    
+                    # NEW: ignore server status/error envelopes early
+                    if isinstance(payload, dict) and "type" in payload and "message" in payload:
+                        logger.info(f"Server event: type={payload.get('type')} message={payload.get('message')}")
+                        continue
+                    
                     try:
                         fc = FrameConverter(sentence=payload, logger=logger)
                         asyncio.run(fc.play(simulate=debug))
                     except Exception:
                         logger.exception("Error during frame handling")
-
         except KeyboardInterrupt:
             logger.info("Interrupted by user. Exiting.")
             break
