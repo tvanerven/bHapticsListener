@@ -7,10 +7,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: |
+
+      - name: Install deps
+        run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pyyaml websockets bhaptics-python sentry_sdk
-          pyinstaller --onefile --console --name bhx_bridge client.py
+          pip install \
+            pyinstaller \
+            pyyaml \
+            websockets \
+            bhaptics-python \
+            sentry-sdk
+
+      - name: Build exe
+        run: |
+          pyinstaller ^
+            --clean ^
+            --onefile ^
+            --console ^
+            --name bhx_bridge ^
+            --hidden-import sentry_sdk ^
+            client.py
+
       - uses: actions/upload-artifact@v4
         with:
           name: bhx_bridge-win
