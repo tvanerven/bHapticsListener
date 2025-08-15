@@ -342,7 +342,7 @@ class FrameConverter:
             self._log_frames()
             return
         for item in self._data:
-            await bh.play_dot(position=0, duration_millis=item["duration"], values=item["values"])
+            await bh.play_dot(0, item["duration"], item["values"])
 
 
 # -------------------------
