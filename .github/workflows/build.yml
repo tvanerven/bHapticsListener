@@ -1,27 +1,29 @@
 name: build-windows-exe
 on: [push]
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
+        with:
+          python-version: '3.12'
 
       - name: Install deps
+        # PowerShell: put everything on one line (or use backticks ` for continuation)
         run: |
-          python -m pip install --upgrade pip
-          pip install \
-            pyinstaller \
-            pyyaml \
-            websockets \
-            bhaptics-python \
-            sentry-sdk
+          python -m pip install --upgrade pip wheel
+          pip install pyinstaller pyyaml websockets bhaptics-python sentry-sdk
 
-      - name: Build exe
+      - name: Build exe from spec
         run: pyinstaller --clean bhx_bridge.spec
 
+      # Upload both possible outputs (onefile vs onedir) to be safe
       - uses: actions/upload-artifact@v4
         with:
           name: bhx_bridge-win
-          path: dist/bhx_bridge.exe
+          path: |
+            dist/bhx_bridge.exe
+            dist/bhx_bridge/bhx_bridge.exe
