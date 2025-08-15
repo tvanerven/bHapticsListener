@@ -19,14 +19,7 @@ jobs:
             sentry-sdk
 
       - name: Build exe
-        run: |
-          pyinstaller ^
-            --clean ^
-            --onefile ^
-            --console ^
-            --name bhx_bridge ^
-            --hidden-import sentry_sdk ^
-            client.py
+        run: pyinstaller --clean bhx_bridge.spec
 
       - uses: actions/upload-artifact@v4
         with:
