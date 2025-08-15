@@ -18,7 +18,7 @@ jobs:
           pip install pyinstaller pyyaml websockets bhaptics-python sentry-sdk
 
       - name: Build exe from spec
-        run: pyinstaller --clean bhx_bridge.spec
+        run: pyinstaller --clean --onefile --console --name bhx_bridge client.py
 
       # Upload both possible outputs (onefile vs onedir) to be safe
       - uses: actions/upload-artifact@v4
