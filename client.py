@@ -226,30 +226,30 @@ class FrameConverter:
         for word in self.sentence:
             self._parse_frames(self.sentence[word])
 
-def _parse_frames(self, word) -> None:
-    for frame in word:
-        duration = int(frame.get("duration", 200))
-        padded = [0] * 32  # TactSuit Pro: 32 motors; adjust if you target X40
-
-        # Combine all frame_nodes into a single motor array
-        fns = frame.get("frame_nodes", [])
-        if not fns:
-            # Explicit pause: append zeros with the duration
+    def _parse_frames(self, word) -> None:
+        for frame in word:
+            duration = int(frame.get("duration", 200))
+            padded = [0] * 32  # TactSuit Pro: 32 motors; adjust if you target X40
+    
+            # Combine all frame_nodes into a single motor array
+            fns = frame.get("frame_nodes", [])
+            if not fns:
+                # Explicit pause: append zeros with the duration
+                self._data.append({"values": padded, "duration": duration})
+                continue
+    
+            for fn in fns:
+                raw = fn.get("intensity", [])
+                idxs = fn.get("node_index", [])
+                for i, idx in enumerate(idxs):
+                    if 0 <= idx < len(padded):
+                        v = raw[i] if i < len(raw) else 0
+                        val = max(0, min(100, round(v * 100 / 255)))
+                        if v > 0 and val == 0:
+                            val = 1
+                        padded[idx] = val
+    
             self._data.append({"values": padded, "duration": duration})
-            continue
-
-        for fn in fns:
-            raw = fn.get("intensity", [])
-            idxs = fn.get("node_index", [])
-            for i, idx in enumerate(idxs):
-                if 0 <= idx < len(padded):
-                    v = raw[i] if i < len(raw) else 0
-                    val = max(0, min(100, round(v * 100 / 255)))
-                    if v > 0 and val == 0:
-                        val = 1
-                    padded[idx] = val
-
-        self._data.append({"values": padded, "duration": duration})
 
     def _log_frames(self) -> None:
         # Compact view: only nonzero motors per frame
