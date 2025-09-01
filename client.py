@@ -247,7 +247,7 @@ class FrameConverter:
         if not isinstance(self.sentence, dict):
             # If the whole payload is a bare int: treat as pause frame.
             if isinstance(self.sentence, int):
-                self._data.append({"values": [0]*32, "duration": max(0, self._coerce_int(self.sentence, 0))})
+                self._data.append({"values": [0]*40, "duration": max(0, self._coerce_int(self.sentence, 0))})
                 return
             self._logger.warning(f"Unexpected payload type {type(self.sentence)}; ignoring.")
             return
@@ -255,7 +255,7 @@ class FrameConverter:
         for key, val in self.sentence.items():
             # Accept int as "pause"
             if isinstance(val, int):
-                self._data.append({"values": [0]*32, "duration": max(0, self._coerce_int(val, 0))})
+                self._data.append({"values": [0]*40, "duration": max(0, self._coerce_int(val, 0))})
                 continue
 
             # A single frame dict or a list of frames
@@ -274,13 +274,13 @@ class FrameConverter:
             if not isinstance(frame, dict):
                 # Defensive: allow numbers here as pause
                 if isinstance(frame, int):
-                    self._data.append({"values": [0]*32, "duration": max(0, self._coerce_int(frame, 0))})
+                    self._data.append({"values": [0]*40, "duration": max(0, self._coerce_int(frame, 0))})
                 else:
                     self._logger.warning(f"Ignoring non-dict frame in {label}[{idx_frame}]: {type(frame)}")
                 continue
 
             duration = self._coerce_int(frame.get("duration", 200), 200)
-            padded = [0] * 32  # Adjust length if you target a different device
+            padded = [0] * 40  # Adjust length if you target a different device
 
             fns = frame.get("frame_nodes", [])
             # Allow frame_nodes to be a dict or list
