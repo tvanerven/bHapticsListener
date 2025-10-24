@@ -88,6 +88,8 @@ def env_override(cfg: dict) -> dict:
     cfg["glitchtip_dsn"] = os.getenv("BHX_SENTRY_DSN",
                              os.getenv("BHX_GLITCHTIP_DSN",
                                       cfg.get("glitchtip_dsn", "")))
+    cfg["inter_frame_gap_ms"] = int(os.getenv("BHX_INTERFRAME_GAP_MS", cfg.get("inter_frame_gap_ms", 0) or 0))
+    cfg["respect_duration_sleep"] = _as_bool(os.getenv("BHX_RESPECT_DURATION_SLEEP", cfg.get("respect_duration_sleep", True)))
     return cfg
 
 def sanitize_websocket_url(url: str, id: str) -> str:
@@ -237,6 +239,44 @@ class FrameConverter:
             return int(x)
         except Exception:
             return default
+        
+    def _append_step(self, values: list[int], duration_ms: int) -> None:
+        self._data.append({"values": values, "duration": max(0, int(duration_ms))})
+        
+    def _merge_nodes_into_values(self, fns) -> list[int]:
+        """Merge one or more frame_nodes dicts into a 40-long intensity list (0..100), using max() per motor."""
+        padded = [0] * 40
+        # Allow dict or list
+        if isinstance(fns, dict):
+            fns = [fns]
+        elif not isinstance(fns, list):
+            fns = []
+
+        for fn in fns:
+            if not isinstance(fn, dict):
+                continue
+            idxs = self._as_list(fn.get("node_index", []))
+            raw  = self._as_list(fn.get("intensity", []))
+            if len(raw) == 1 and len(idxs) > 1:
+                raw = raw * len(idxs)
+
+            for i, idx in enumerate(idxs):
+                try:
+                    idx = int(idx)
+                except Exception:
+                    continue
+                if 0 <= idx < len(padded):
+                    v = raw[i] if i < len(raw) else 0
+                    try:
+                        v = int(v)
+                    except Exception:
+                        v = 0
+                    # Scale 0..255 -> 0..100 (ensure >0 maps to at least 1)
+                    val = max(0, min(100, round(v * 100 / 255)))
+                    if v > 0 and val == 0:
+                        val = 1
+                    padded[idx] = max(padded[idx], val)  # parallel merge via max
+        return padded
 
     def _parse_sentence(self) -> None:
         # Ignore server “event” messages that aren’t frame payloads
@@ -270,65 +310,62 @@ class FrameConverter:
             self._parse_frames(frames, label=key)
 
     def _parse_frames(self, frames, label: str) -> None:
-        for idx_frame, frame in enumerate(frames):
-            if not isinstance(frame, dict):
-                # Defensive: allow numbers here as pause
-                if isinstance(frame, int):
-                    self._data.append({"values": [0]*40, "duration": max(0, self._coerce_int(frame, 0))})
-                else:
-                    self._logger.warning(f"Ignoring non-dict frame in {label}[{idx_frame}]: {type(frame)}")
-                continue
+        # Normalize to list of dicts (allow a simple int to mean "pause")
+        norm = []
+        for f in frames:
+            if isinstance(f, int):
+                norm.append({"duration": int(f), "frame_nodes": []})
+            elif isinstance(f, dict):
+                norm.append(f)
+            else:
+                self._logger.warning(f"Ignoring non-dict frame in {label}: {type(f)}")
 
-            duration = self._coerce_int(frame.get("duration", 200), 200)
-            padded = [0] * 40  # Adjust length if you target a different device
+        if not norm:
+            return
 
-            fns = frame.get("frame_nodes", [])
-            # Allow frame_nodes to be a dict or list
-            if isinstance(fns, dict):
-                fns = [fns]
-            elif not isinstance(fns, list):
-                self._logger.warning(f"{label}[{idx_frame}]: frame_nodes has unexpected type {type(fns)}; treating as empty.")
-                fns = []
+        # Detect whether we have an explicit sequence (any frame carries 'order')
+        has_order = any(isinstance(f, dict) and ("order" in f) for f in norm)
 
-            if not fns:
-                # Explicit pause: append zeros with the duration
-                self._data.append({"values": padded, "duration": max(0, duration)})
-                continue
+        if not has_order:
+            # === Parallel-only (legacy) ===
+            # Previous behavior: treat each dict as its own frame, in list order.
+            for idx_frame, frame in enumerate(norm):
+                duration = self._coerce_int(frame.get("duration", 200), 200)
+                fns      = frame.get("frame_nodes", [])
+                values   = self._merge_nodes_into_values(fns)
+                # If no nodes provided => pause of 'duration'
+                self._append_step(values, duration)
+            return
 
-            for fn_idx, fn in enumerate(fns):
-                if not isinstance(fn, dict):
-                    self._logger.warning(f"{label}[{idx_frame}].frame_nodes[{fn_idx}] not a dict; skipping.")
-                    continue
+        # === Sequential mode (new) ===
+        # Group by 'order'; within each order, merge all frames in parallel.
+        steps: dict[int, list[dict]] = {}
+        for frame in norm:
+            try:
+                step_idx = int(frame.get("order", 0))
+            except Exception:
+                step_idx = 0
+            steps.setdefault(step_idx, []).append(frame)
 
-                idxs = self._as_list(fn.get("node_index", []))
-                raw  = self._as_list(fn.get("intensity", []))
+        for step_idx in sorted(steps.keys()):
+            group = steps[step_idx]
+            # Merge all frame_nodes in this step (parallel within the step)
+            merged_values = [0] * 40
+            step_duration = 0
 
-                # Broadcast single intensity across all idxs if needed
-                if len(raw) == 1 and len(idxs) > 1:
-                    raw = raw * len(idxs)
+            for f in group:
+                duration = self._coerce_int(f.get("duration", 200), 200)
+                step_duration = max(step_duration, duration)
 
-                for i, idx in enumerate(idxs):
-                    if not isinstance(idx, int):
-                        try:
-                            idx = int(idx)
-                        except Exception:
-                            self._logger.warning(f"{label}[{idx_frame}].frame_nodes[{fn_idx}]: bad idx={idx}; skipping")
-                            continue
-                    if 0 <= idx < len(padded):
-                        v = raw[i] if i < len(raw) else 0
-                        try:
-                            v = int(v)
-                        except Exception:
-                            v = 0
-                        # Scale 0..255 -> 0..100
-                        val = max(0, min(100, round(v * 100 / 255)))
-                        if v > 0 and val == 0:
-                            val = 1
-                        padded[idx] = val
-                    else:
-                        self._logger.warning(f"{label}[{idx_frame}].frame_nodes[{fn_idx}]: idx {idx} out of range")
+                fns = f.get("frame_nodes", [])
+                vals = self._merge_nodes_into_values(fns)
+                # Parallel combine by max per motor
+                merged_values = [max(a, b) for a, b in zip(merged_values, vals)]
 
-            self._data.append({"values": padded, "duration": max(0, duration)})
+            # If the (first) item of the step is an explicit pause (empty frame_nodes), we still add a zero frame
+            self._append_step(merged_values, step_duration)
+
+        self._logger.info(f"{label}: built {len(steps)} sequential step(s) from ordered frames.")
 
     def _log_frames(self) -> None:
         total = len(self._data)
@@ -337,18 +374,50 @@ class FrameConverter:
             nz = {i: v for i, v in enumerate(item["values"]) if v}
             self._logger.info(f"  frame {n}: duration={item['duration']}ms motors={nz}")
 
-    async def play(self, simulate: bool = False) -> None:
+    async def play(self, simulate: bool = False,
+                   inter_frame_gap_ms: int = 0,
+                   respect_duration_sleep: bool = True) -> None:
+        """
+        Plays frames sequentially. If respect_duration_sleep=True, we sleep for each frame's
+        duration after sending it to ensure back-to-back timing. Optionally adds a small
+        inter-frame gap to avoid edge overlaps in the Player.
+        """
         if simulate:
             self._log_frames()
             return
-        for item in self._data:
-            await bh.play_dot(0, item["duration"], item["values"])
+
+        total = len(self._data)
+        for idx, item in enumerate(self._data):
+            duration_ms = max(0, int(item["duration"]))
+            values = item["values"] or [0]*40
+            is_pause = all(v == 0 for v in values)
+
+            try:
+                if is_pause:
+                    # Pure pause: no need to call SDK; just wait.
+                    if duration_ms > 0:
+                        await asyncio.sleep(duration_ms / 1000.0)
+                else:
+                    # Send the frame to the Player
+                    await bh.play_dot(0, duration_ms, values)
+                    # Ensure the frame's duration is honored
+                    if respect_duration_sleep and duration_ms > 0:
+                        await asyncio.sleep(duration_ms / 1000.0)
+
+                # Optional tiny pad between frames (except after the last)
+                if inter_frame_gap_ms > 0 and idx < (total - 1):
+                    await asyncio.sleep(inter_frame_gap_ms / 1000.0)
+
+            except Exception:
+                # Keep going even if one frame has an issue
+                self._logger.exception("Error while playing a frame; continuing to next.")
 
 
 # -------------------------
 # Runtime
 # -------------------------
-def websocket_loop(ws_url: str, logger: Logger, debug: bool):
+def websocket_loop(ws_url: str, logger: Logger, debug: bool,
+                   inter_frame_gap_ms: int, respect_duration_sleep: bool):
     """
     Sync client loop with:
     - Protocol pings (ping_interval/ping_timeout)
@@ -407,7 +476,11 @@ def websocket_loop(ws_url: str, logger: Logger, debug: bool):
                     
                     try:
                         fc = FrameConverter(sentence=payload, logger=logger)
-                        asyncio.run(fc.play(simulate=debug))
+                        asyncio.run(fc.play(
+                            simulate=debug,
+                            inter_frame_gap_ms=inter_frame_gap_ms,
+                            respect_duration_sleep=respect_duration_sleep
+                        ))
                     except Exception:
                         logger.exception("Error during frame handling")
         except KeyboardInterrupt:
@@ -456,7 +529,11 @@ def main():
         raise
 
     try:
-        websocket_loop(cfg["ws_url"], logger, debug)
+        websocket_loop(
+            cfg["ws_url"], logger, debug,
+            inter_frame_gap_ms=int(cfg.get("inter_frame_gap_ms", 0)),
+            respect_duration_sleep=_as_bool(cfg.get("respect_duration_sleep", True)),
+        )
     finally:
         asyncio.run(shutdown_bhaptics(logger, debug))
 
